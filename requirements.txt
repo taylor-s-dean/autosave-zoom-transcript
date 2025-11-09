@@ -1,11 +1,12 @@
 # Requirements for autosave-zoom-transcript.py
-# This script uses only Python standard library modules:
+# External dependencies:
+pyobjc-framework-ApplicationServices>=10.0
+pyobjc-framework-Cocoa>=10.0
+pyobjc-core>=10.0
+
+# Standard library modules used:
 # - argparse
-# - json
-# - shutil
-# - subprocess
 # - sys
 # - time
-#
-# No external dependencies are required.
+# - typing
 
