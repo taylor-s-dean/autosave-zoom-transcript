@@ -1,0 +1,11 @@
+# Requirements for autosave-zoom-transcript.py
+# This script uses only Python standard library modules:
+# - argparse
+# - json
+# - shutil
+# - subprocess
+# - sys
+# - time
+#
+# No external dependencies are required.
+
