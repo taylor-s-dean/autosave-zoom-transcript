@@ -73,8 +73,44 @@ function dbg(m){ if (__DEBUG__) console.log('[DBG] ' + m); }
   // 5) search: label match first, then last button in scope
   function searchAndPress(scopeObj, label){
     try {
-      var elems = scopeObj.entireContents();
-      dbg('scan scope elems=' + elems.length);
+      // Try to get elements more efficiently - start with direct children
+      var elems = null;
+      try {
+        // First try a more targeted approach: get UI elements directly
+        var uiElems = scopeObj.UIElements();
+        if (uiElems && uiElems.length > 0) {
+          // Build a smaller list from direct UI elements and their children
+          elems = [];
+          for (var k=0; k<uiElems.length && k<50; k++) { // Limit to first 50 to avoid hanging
+            try {
+              elems.push(uiElems[k]);
+              var children = uiElems[k].UIElements();
+              if (children) {
+                for (var c=0; c<children.length && c<20; c++) {
+                  elems.push(children[c]);
+                }
+              }
+            } catch(_){}
+          }
+          dbg('using targeted UI elements scan: ' + elems.length);
+        }
+      } catch(_){}
+      
+      // Fallback to entireContents if targeted approach didn't work
+      if (!elems || elems.length === 0) {
+        try {
+          elems = scopeObj.entireContents();
+          dbg('using entireContents scan: ' + elems.length);
+        } catch(e) {
+          dbg('entireContents() failed: ' + e);
+          return 'NOT_FOUND';
+        }
+      }
+      
+      if (!elems || elems.length === 0) {
+        dbg('no elements found in scope');
+        return 'NOT_FOUND';
+      }
 
       // 5a) match by name/description/help
       for (var i=0;i<elems.length;i++){
@@ -124,40 +160,77 @@ function dbg(m){ if (__DEBUG__) console.log('[DBG] ' + m); }
 })();
 """
 
-def run_jxa(text: str, pane: str, app: str | None, debug: bool, do_act: bool) -> str:
+
+def run_jxa(
+    text: str, pane: str, app: str | None, debug: bool, do_act: bool, timeout: int = 10
+) -> str:
     candidates = [app] if app else ["zoom.us", "Zoom Workplace"]
-    jxa = (JXA_TEMPLATE
-           .replace("__DEBUG__", "true" if debug else "false")
-           .replace("__PANE__", json.dumps(pane))
-           .replace("__NEEDLE__", json.dumps(text.lower()))
-           .replace("__CANDIDATES__", json.dumps(candidates))
-           .replace("__DO_ACT__", "true" if do_act else "false"))
-    proc = subprocess.run(["osascript", "-l", "JavaScript", "-"],
-                          input=jxa, text=True, capture_output=True)
-    out = (proc.stdout or "") + (proc.stderr or "")
-    return out.strip()
+    jxa = (
+        JXA_TEMPLATE.replace("__DEBUG__", "true" if debug else "false")
+        .replace("__PANE__", json.dumps(pane))
+        .replace("__NEEDLE__", json.dumps(text.lower()))
+        .replace("__CANDIDATES__", json.dumps(candidates))
+        .replace("__DO_ACT__", "true" if do_act else "false")
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-l", "JavaScript", "-"],
+            input=jxa,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        return out.strip()
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT"
+    except Exception as e:
+        return f"ERROR: {str(e)}"
+
 
 def main():
     ap = argparse.ArgumentParser(
         description="Zoom Transcript autoclicker (no mouse). Prefers background (no focus), falls back to focus."
     )
-    ap.add_argument("--text", default="save transcript",
-                    help="Substring to match in name/description/help (case-insensitive). Default: 'save transcript'")
-    ap.add_argument("--pane", default="Transcript",
-                    help="Pane/window label to anchor scope. Default: Transcript")
-    ap.add_argument("--app", default=None,
-                    help="Override Zoom process name (e.g., 'zoom.us' or 'Zoom Workplace').")
-    ap.add_argument("--interval", type=int, default=60,
-                    help="Seconds between clicks. Default: 60")
-    ap.add_argument("--once", action="store_true",
-                    help="Click once then exit.")
-    ap.add_argument("--debug", action="store_true",
-                    help="Print detailed [DBG] logs from JXA.")
+    ap.add_argument(
+        "--text",
+        default="save transcript",
+        help="Substring to match in name/description/help (case-insensitive). Default: 'save transcript'",
+    )
+    ap.add_argument(
+        "--pane",
+        default="Transcript",
+        help="Pane/window label to anchor scope. Default: Transcript",
+    )
+    ap.add_argument(
+        "--app",
+        default=None,
+        help="Override Zoom process name (e.g., 'zoom.us' or 'Zoom Workplace').",
+    )
+    ap.add_argument(
+        "--interval", type=int, default=60, help="Seconds between clicks. Default: 60"
+    )
+    ap.add_argument(
+        "--timeout",
+        type=int,
+        default=10,
+        help="Timeout in seconds for each osascript call. Default: 10",
+    )
+    ap.add_argument("--once", action="store_true", help="Click once then exit.")
+    ap.add_argument(
+        "--debug", action="store_true", help="Print detailed [DBG] logs from JXA."
+    )
     mode = ap.add_mutually_exclusive_group()
-    mode.add_argument("--background-only", action="store_true",
-                      help="Never focus Zoom; do not fall back to focus.")
-    mode.add_argument("--force-focus", action="store_true",
-                      help="Always focus Zoom before scanning; skip background attempt.")
+    mode.add_argument(
+        "--background-only",
+        action="store_true",
+        help="Never focus Zoom; do not fall back to focus.",
+    )
+    mode.add_argument(
+        "--force-focus",
+        action="store_true",
+        help="Always focus Zoom before scanning; skip background attempt.",
+    )
     args = ap.parse_args()
 
     if shutil.which("osascript") is None:
@@ -167,9 +240,17 @@ def main():
     print(f"[RUN] Python: {sys.executable}")
     print(f"[RUN] Zoom app candidates: {args.app or 'zoom.us, Zoom Workplace'}")
     print(f"[RUN] Target text: {args.text!r} | Pane: {args.pane!r}")
-    pref = "background-only" if args.background_only else ("force-focus" if args.force_focus else "auto (background → focus fallback)")
+    pref = (
+        "background-only"
+        if args.background_only
+        else (
+            "force-focus" if args.force_focus else "auto (background → focus fallback)"
+        )
+    )
     print(f"[RUN] Mode: {pref} | Interval: {args.interval}s | Debug: {args.debug}")
-    print("[NOTE] Ensure Accessibility + Automation permissions for your terminal, Python, System Events, and Zoom.")
+    print(
+        "[NOTE] Ensure Accessibility + Automation permissions for your terminal, Python, System Events, and Zoom."
+    )
 
     def print_result(tag: str, out: str):
         if args.debug:
@@ -187,23 +268,64 @@ def main():
 
             if args.force_focus:
                 # Always focus
-                out = run_jxa(args.text, args.pane, args.app, args.debug, do_act=True)
+                out = run_jxa(
+                    args.text,
+                    args.pane,
+                    args.app,
+                    args.debug,
+                    do_act=True,
+                    timeout=args.timeout,
+                )
                 print_result("FOCUS", out)
 
             elif args.background_only:
                 # Never focus
-                out = run_jxa(args.text, args.pane, args.app, args.debug, do_act=False)
+                out = run_jxa(
+                    args.text,
+                    args.pane,
+                    args.app,
+                    args.debug,
+                    do_act=False,
+                    timeout=args.timeout,
+                )
                 print_result("BG", out)
 
             else:
                 # AUTO: try background first, then fallback to focus if needed
-                out_bg = run_jxa(args.text, args.pane, args.app, args.debug, do_act=False)
+                out_bg = run_jxa(
+                    args.text,
+                    args.pane,
+                    args.app,
+                    args.debug,
+                    do_act=False,
+                    timeout=args.timeout,
+                )
                 status_bg = out_bg.splitlines()[-1] if out_bg else ""
                 if status_bg in ("OK_LABEL", "OK_FALLBACK"):
                     print_result("BG", out_bg)
+                elif status_bg == "TIMEOUT":
+                    # If background times out, try focus mode as fallback
+                    if args.debug:
+                        print_result("BG", out_bg)
+                    out_fg = run_jxa(
+                        args.text,
+                        args.pane,
+                        args.app,
+                        args.debug,
+                        do_act=True,
+                        timeout=args.timeout,
+                    )
+                    print_result("FOCUS", out_fg)
                 else:
                     # Fallback with a quick focus hop
-                    out_fg = run_jxa(args.text, args.pane, args.app, args.debug, do_act=True)
+                    out_fg = run_jxa(
+                        args.text,
+                        args.pane,
+                        args.app,
+                        args.debug,
+                        do_act=True,
+                        timeout=args.timeout,
+                    )
                     # Print both results so it's clear what happened
                     if args.debug:
                         print_result("BG", out_bg)
@@ -211,7 +333,11 @@ def main():
                     else:
                         # If focus succeeded, show FOCUS; otherwise show BG status
                         status_fg = out_fg.splitlines()[-1] if out_fg else ""
-                        which = "FOCUS" if status_fg in ("OK_LABEL", "OK_FALLBACK") else "BG"
+                        which = (
+                            "FOCUS"
+                            if status_fg in ("OK_LABEL", "OK_FALLBACK")
+                            else "BG"
+                        )
                         print_result(which, out_fg if which == "FOCUS" else out_bg)
 
             if args.once:
@@ -219,6 +345,6 @@ def main():
     except KeyboardInterrupt:
         print("\n[STOP] User interrupted.")
 
+
 if __name__ == "__main__":
     main()
-
