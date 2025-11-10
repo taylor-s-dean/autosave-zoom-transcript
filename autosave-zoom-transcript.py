@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import os
+import subprocess
 import sys
 import time
 from typing import Optional
@@ -37,31 +39,50 @@ def dbg(message: str, debug: bool):
 
 
 def get_zoom_process(candidates: list[str], debug: bool) -> Optional[int]:
-    """Find the Zoom process by name and return its PID"""
-    workspace = NSWorkspace.sharedWorkspace()
-    running_apps = workspace.runningApplications()
+    """Find the Zoom process by name and return its PID.
 
-    for candidate in candidates:
-        for app in running_apps:
-            bundle_id = app.bundleIdentifier()
-            localized_name = app.localizedName()
-
-            if bundle_id == candidate or localized_name == candidate:
-                pid = app.processIdentifier()
-                dbg(f"Found Zoom process: {candidate} (PID: {pid})", debug)
+    Uses pgrep to find Zoom processes, which always returns current PIDs.
+    This avoids the stale data issue with NSWorkspace.runningApplications().
+    """
+    try:
+        # Find Zoom process using pgrep
+        result = subprocess.run(
+            ["pgrep", "-x", "zoom.us"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            pids = [
+                int(pid.strip())
+                for pid in result.stdout.strip().split("\n")
+                if pid.strip()
+            ]
+            # Return the first PID found
+            if pids:
+                pid = pids[0]
+                dbg(f"Found Zoom process via pgrep (PID: {pid})", debug)
                 return pid
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, ValueError) as e:
+        if debug:
+            dbg(f"pgrep failed: {e}", debug)
 
-    dbg("NO_PROCESS", debug)
+    dbg("NO_PROCESS - Zoom not found", debug)
     return None
 
 
 def activate_application(pid: int, debug: bool) -> bool:
-    """Activate the application by PID using NSWorkspace"""
+    """Activate the application by PID using NSWorkspace.
+
+    Note: Queries runningApplications() fresh each time to handle cases
+    where Zoom restarts and gets a new PID.
+    """
     try:
         workspace = NSWorkspace.sharedWorkspace()
+        # runningApplications() queries the system fresh each time (no caching)
         running_apps = workspace.runningApplications()
 
-        # Find the app by PID
+        # Find the app by PID - if PID is stale, this will fail gracefully
         for app in running_apps:
             if app.processIdentifier() == pid:
                 app.activateWithOptions_(0)  # NSApplicationActivateAllWindows
@@ -69,7 +90,7 @@ def activate_application(pid: int, debug: bool) -> bool:
                 dbg("Application activated", debug)
                 return True
 
-        dbg(f"Failed to find application with PID {pid}", debug)
+        dbg(f"Failed to find application with PID {pid} (may have restarted)", debug)
         return False
     except Exception as e:
         dbg(f"Exception activating application: {e}", debug)
@@ -102,15 +123,53 @@ def get_attribute_string(element, attribute, debug: bool = False) -> str:
         return ""
 
 
-def get_windows(pid: int, debug: bool) -> list:
-    """Get all windows for the application"""
+def get_windows(pid: int, debug: bool, retry_count: int = 0) -> list:
+    """Get all windows for the application.
+
+    Note: Creates a fresh AXUIElement from the PID each time.
+    If the PID is stale (Zoom restarted), this will fail gracefully.
+
+    Args:
+        pid: Process ID
+        debug: Enable debug logging
+        retry_count: Internal parameter for retry attempts (max 2 retries with delay)
+    """
     try:
         app_element = AXUIElementCreateApplication(pid)
         # PyObjC returns (error_code, value) tuple
         result, windows = AXUIElementCopyAttributeValue(
             app_element, kAXWindowsAttribute, None
         )
-        if result == 0 and windows:
+        # Check for common errors that indicate stale PID
+        if result != 0:
+            # -25204 = kAXErrorInvalidUIElement, -25205 = kAXErrorCannotComplete
+            if result in (-25204, -25205):
+                if debug:
+                    dbg(
+                        f"PID {pid} appears to be stale (Zoom may have restarted): error {result}",
+                        debug,
+                    )
+            return []
+
+        # If no windows and we haven't retried yet, wait a bit and retry
+        # (Zoom might be starting up and windows not ready yet, especially after restart)
+        if not windows and retry_count < 3:
+            wait_time = 0.5 * (retry_count + 1)  # Exponential backoff: 0.5s, 1.0s, 1.5s
+            if debug:
+                dbg(
+                    f"No windows found, retrying in {wait_time}s (attempt {retry_count + 1}/3)...",
+                    debug,
+                )
+            time.sleep(wait_time)
+            return get_windows(pid, debug, retry_count + 1)
+
+        if not windows and debug:
+            dbg(
+                f"No windows found after {retry_count + 1} attempts - Zoom may still be starting or has no windows",
+                debug,
+            )
+
+        if windows:
             # PyObjC may return a list or CFArray - handle both
             if isinstance(windows, list):
                 window_list = windows
@@ -149,25 +208,16 @@ def find_scope_window(windows: list, pane: str, debug: bool):
             dbg(f'scope=Transcript window (undocked): "{name}"', debug)
             return window
 
-    # 2) Else "Zoom Meeting"
+    # 2) Else "Zoom Meeting" - only search in meeting windows
     for window in windows:
         name = get_window_name(window, debug)
-        if "meeting" in name.lower():
+        if name and "meeting" in name.lower():
             dbg(f'scope=Zoom Meeting window: "{name}"', debug)
             return window
 
-    # 3) Else first named window
-    for window in windows:
-        name = get_window_name(window, debug)
-        if name:
-            dbg(f'scope=first named window: "{name}"', debug)
-            return window
-
-    # 4) Else last window
-    if windows:
-        dbg("scope=last window (fallback)", debug)
-        return windows[-1]
-
+    # 3) No meeting window found - return None to avoid searching in wrong windows
+    # (e.g., "Share Screen", "Zoom Workplace" home screen, etc.)
+    dbg("No meeting or transcript window found - meeting may be closed", debug)
     return None
 
 
@@ -243,7 +293,7 @@ def search_and_press(scope_window, needle: str, debug: bool) -> str:
             dbg("no elements found in scope", debug)
             return "NOT_FOUND"
 
-        # 1) Match by name/description/help
+        # Only match by name/description/help - no fallback to random buttons
         needle_lower = needle.lower()
         for elem in all_elements:
             try:
@@ -253,6 +303,16 @@ def search_and_press(scope_window, needle: str, debug: bool) -> str:
 
                 haystack = f"{name}|{desc}|{help_text}".lower()
                 if needle_lower in haystack:
+                    # Verify it's actually a button before clicking
+                    role = get_attribute_string(elem, kAXRoleAttribute, debug)
+                    if role.lower() != kAXButtonRole.lower():
+                        if debug:
+                            dbg(
+                                f'MATCH found but not a button (role="{role}"), skipping',
+                                debug,
+                            )
+                        continue
+
                     dbg(
                         f'MATCH label name="{name}" desc="{desc}" help="{help_text}"',
                         debug,
@@ -266,36 +326,11 @@ def search_and_press(scope_window, needle: str, debug: bool) -> str:
                     dbg(f"Error checking element: {e}", debug)
                 continue
 
-        # 2) Fallback: last button
-        buttons: list = []
-        for elem in all_elements:
-            try:
-                role = get_attribute_string(elem, kAXRoleAttribute, debug)
-                if role.lower() == kAXButtonRole.lower():
-                    name = get_attribute_string(elem, kAXTitleAttribute, debug)
-                    desc = get_attribute_string(elem, kAXDescriptionAttribute, debug)
-                    help_text = get_attribute_string(elem, kAXHelpAttribute, debug)
-                    if debug and len(buttons) < 5:
-                        dbg(
-                            f'button[{len(buttons)}] name="{name}" desc="{desc}" help="{help_text}"',
-                            debug,
-                        )
-                    buttons.append(elem)
-            except:
-                continue
-
-        dbg(f"AXButtons in scope={len(buttons)}", debug)
-        if buttons:
-            last_btn = buttons[-1]
-            name = get_attribute_string(last_btn, kAXTitleAttribute, debug)
-            desc = get_attribute_string(last_btn, kAXDescriptionAttribute, debug)
-            help_text = get_attribute_string(last_btn, kAXHelpAttribute, debug)
-            dbg(f'lastBtn name="{name}" desc="{desc}" help="{help_text}"', debug)
-            if press_element(last_btn, debug):
-                dbg("ACTION: press lastBtn -> OK", debug)
-                return "OK_FALLBACK"
-            return "PRESS_FAILED"
-
+        # No fallback - only click if we find the exact button we're looking for
+        dbg(
+            "Save transcript button not found - meeting may be closed or transcript unavailable",
+            debug,
+        )
         return "NOT_FOUND"
     except Exception as e:
         dbg(f"searchAndPress failed: {e}", debug)
@@ -310,10 +345,14 @@ def run_accessibility_click(
     do_act: bool,
     timeout: int = 10,
 ) -> str:
-    """Main function to find and click the button using Accessibility API"""
+    """Main function to find and click the button using Accessibility API.
+
+    Note: This function gets a fresh Zoom PID on every call, so it handles
+    cases where Zoom restarts and gets a new PID between loop iterations.
+    """
     candidates = [app] if app else ["zoom.us", "Zoom Workplace"]
 
-    # Find Zoom process
+    # Find Zoom process - gets fresh PID on every call
     pid = get_zoom_process(candidates, debug)
     if not pid:
         return "NO_PROCESS"
