@@ -32,13 +32,19 @@ except ImportError as e:
     sys.exit(1)
 
 
+# Configuration constants
+TEXT = "save transcript"
+PANE = "Transcript"
+APP = "zoom.us"
+
+
 def dbg(message: str, debug: bool):
     """Debug logging helper"""
     if debug:
         print(f"[DBG] {message}")
 
 
-def get_zoom_process(candidates: list[str], debug: bool) -> Optional[int]:
+def get_zoom_process(debug: bool) -> Optional[int]:
     """Find the Zoom process by name and return its PID.
 
     Uses pgrep to find Zoom processes, which always returns current PIDs.
@@ -69,32 +75,6 @@ def get_zoom_process(candidates: list[str], debug: bool) -> Optional[int]:
 
     dbg("NO_PROCESS - Zoom not found", debug)
     return None
-
-
-def activate_application(pid: int, debug: bool) -> bool:
-    """Activate the application by PID using NSWorkspace.
-
-    Note: Queries runningApplications() fresh each time to handle cases
-    where Zoom restarts and gets a new PID.
-    """
-    try:
-        workspace = NSWorkspace.sharedWorkspace()
-        # runningApplications() queries the system fresh each time (no caching)
-        running_apps = workspace.runningApplications()
-
-        # Find the app by PID - if PID is stale, this will fail gracefully
-        for app in running_apps:
-            if app.processIdentifier() == pid:
-                app.activateWithOptions_(0)  # NSApplicationActivateAllWindows
-                time.sleep(0.30)  # Give it time to hydrate
-                dbg("Application activated", debug)
-                return True
-
-        dbg(f"Failed to find application with PID {pid} (may have restarted)", debug)
-        return False
-    except Exception as e:
-        dbg(f"Exception activating application: {e}", debug)
-        return False
 
 
 def get_attribute_value(element, attribute, debug: bool = False):
@@ -337,31 +317,17 @@ def search_and_press(scope_window, needle: str, debug: bool) -> str:
         return "NOT_FOUND"
 
 
-def run_accessibility_click(
-    text: str,
-    pane: str,
-    app: Optional[str],
-    debug: bool,
-    do_act: bool,
-    timeout: int = 10,
-) -> str:
+def run_accessibility_click(debug: bool) -> str:
     """Main function to find and click the button using Accessibility API.
 
     Note: This function gets a fresh Zoom PID on every call, so it handles
     cases where Zoom restarts and gets a new PID between loop iterations.
+    Always runs in background mode (does not activate/focus Zoom).
     """
-    candidates = [app] if app else ["zoom.us", "Zoom Workplace"]
-
     # Find Zoom process - gets fresh PID on every call
-    pid = get_zoom_process(candidates, debug)
+    pid = get_zoom_process(debug)
     if not pid:
         return "NO_PROCESS"
-
-    # Optionally activate
-    if do_act:
-        activate_application(pid, debug)
-    else:
-        dbg("no-focus mode: skipping activate()", debug)
 
     # Get windows
     windows = get_windows(pid, debug)
@@ -374,149 +340,50 @@ def run_accessibility_click(
         dbg(f'window[{i}]="{name}"', debug)
 
     # Find scope window
-    scope = find_scope_window(windows, pane, debug)
+    scope = find_scope_window(windows, PANE, debug)
     if not scope:
         return "NO_SCOPE"
 
     # Search and press
-    status = search_and_press(scope, text.lower(), debug)
+    status = search_and_press(scope, TEXT.lower(), debug)
     return status
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Zoom Transcript autoclicker (no mouse). Prefers background (no focus), falls back to focus."
-    )
-    ap.add_argument(
-        "--text",
-        default="save transcript",
-        help="Substring to match in name/description/help (case-insensitive). Default: 'save transcript'",
-    )
-    ap.add_argument(
-        "--pane",
-        default="Transcript",
-        help="Pane/window label to anchor scope. Default: Transcript",
-    )
-    ap.add_argument(
-        "--app",
-        default=None,
-        help="Override Zoom process name (e.g., 'zoom.us' or 'Zoom Workplace').",
+        description="Zoom Transcript autoclicker. Runs in background mode (no focus required)."
     )
     ap.add_argument(
         "--interval", type=int, default=60, help="Seconds between clicks. Default: 60"
     )
-    ap.add_argument(
-        "--timeout",
-        type=int,
-        default=10,
-        help="Timeout in seconds for each attempt. Default: 10",
-    )
     ap.add_argument("--once", action="store_true", help="Click once then exit.")
     ap.add_argument("--debug", action="store_true", help="Print detailed [DBG] logs.")
-    mode = ap.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--background-only",
-        action="store_true",
-        help="Never focus Zoom; do not fall back to focus.",
-    )
-    mode.add_argument(
-        "--force-focus",
-        action="store_true",
-        help="Always focus Zoom before scanning; skip background attempt.",
-    )
     args = ap.parse_args()
 
     print(f"[RUN] Python: {sys.executable}")
-    print(f"[RUN] Zoom app candidates: {args.app or 'zoom.us, Zoom Workplace'}")
-    print(f"[RUN] Target text: {args.text!r} | Pane: {args.pane!r}")
-    pref = (
-        "background-only"
-        if args.background_only
-        else (
-            "force-focus" if args.force_focus else "auto (background → focus fallback)"
-        )
-    )
-    print(f"[RUN] Mode: {pref} | Interval: {args.interval}s | Debug: {args.debug}")
+    print(f"[RUN] Zoom app: {APP}")
+    print(f"[RUN] Target text: {TEXT!r} | Pane: {PANE!r}")
+    print(f"[RUN] Interval: {args.interval}s | Debug: {args.debug}")
     print(
         "[NOTE] Ensure Accessibility + Automation permissions for your terminal, Python, System Events, and Zoom."
     )
 
-    def print_result(tag: str, out: str):
+    def print_result(out: str):
         if args.debug:
-            print(f"[{tag}] {out}")
+            print(f"[RESULT] {out}")
             if out:
                 print("[STATUS]", out.splitlines()[-1] if "\n" in out else out)
         else:
             status = out.splitlines()[-1] if "\n" in out else out
-            print(f"[{tag}] {status or '[NO OUTPUT]'}")
+            print(f"[RESULT] {status or '[NO OUTPUT]'}")
 
     try:
         while True:
             if args.interval > 0 and not args.once:
                 time.sleep(args.interval)
 
-            if args.force_focus:
-                # Always focus
-                out = run_accessibility_click(
-                    args.text,
-                    args.pane,
-                    args.app,
-                    args.debug,
-                    do_act=True,
-                    timeout=args.timeout,
-                )
-                print_result("FOCUS", out)
-
-            elif args.background_only:
-                # Never focus
-                out = run_accessibility_click(
-                    args.text,
-                    args.pane,
-                    args.app,
-                    args.debug,
-                    do_act=False,
-                    timeout=args.timeout,
-                )
-                print_result("BG", out)
-
-            else:
-                # AUTO: try background first, then fallback to focus if needed
-                out_bg = run_accessibility_click(
-                    args.text,
-                    args.pane,
-                    args.app,
-                    args.debug,
-                    do_act=False,
-                    timeout=args.timeout,
-                )
-                status_bg = out_bg.splitlines()[-1] if "\n" in out_bg else out_bg
-                if status_bg in ("OK_LABEL", "OK_FALLBACK"):
-                    print_result("BG", out_bg)
-                else:
-                    # Fallback with a quick focus hop
-                    out_fg = run_accessibility_click(
-                        args.text,
-                        args.pane,
-                        args.app,
-                        args.debug,
-                        do_act=True,
-                        timeout=args.timeout,
-                    )
-                    # Print both results so it's clear what happened
-                    if args.debug:
-                        print_result("BG", out_bg)
-                        print_result("FOCUS", out_fg)
-                    else:
-                        # If focus succeeded, show FOCUS; otherwise show BG status
-                        status_fg = (
-                            out_fg.splitlines()[-1] if "\n" in out_fg else out_fg
-                        )
-                        which = (
-                            "FOCUS"
-                            if status_fg in ("OK_LABEL", "OK_FALLBACK")
-                            else "BG"
-                        )
-                        print_result(which, out_fg if which == "FOCUS" else out_bg)
+            out = run_accessibility_click(args.debug)
+            print_result(out)
 
             if args.once:
                 break
