@@ -17,7 +17,15 @@ This project uses Python 3.13.4 via pyenv. The `.python-version` file ensures th
 
 ### Dependencies
 
-No external dependencies required - uses only Python standard library modules.
+Install PyObjC frameworks:
+```bash
+pip install -r requirements.txt
+```
+
+This installs:
+- `pyobjc-framework-ApplicationServices` - For Accessibility API
+- `pyobjc-framework-Cocoa` - For AppKit (NSWorkspace)
+- `pyobjc-core` - Core PyObjC functionality
 
 ## Running as a LaunchAgent (Recommended)
 
@@ -52,7 +60,7 @@ The installation process will:
 The LaunchAgent is configured to:
 - Start automatically on login
 - Restart automatically if it crashes
-- Run in background-only mode (no window focus)
+- Run in background mode (no window focus required)
 - Check every 10 seconds (configurable in the plist template)
 - Log output to `~/Library/Logs/autosave-zoom-transcript/autosave-zoom-transcript.log` and errors to `autosave-zoom-transcript.error.log`
 
@@ -66,26 +74,30 @@ python autosave-zoom-transcript.py [options]
 
 ### Options
 
-- `--text TEXT`: Substring to match in button name/description (default: "save transcript")
-- `--pane TEXT`: Pane/window label to anchor scope (default: "Transcript")
-- `--app TEXT`: Override Zoom process name (e.g., "zoom.us" or "Zoom Workplace")
 - `--interval SECONDS`: Seconds between clicks (default: 60)
 - `--once`: Click once then exit
 - `--debug`: Print detailed debug logs
-- `--background-only`: Never focus Zoom; do not fall back to focus
-- `--force-focus`: Always focus Zoom before scanning
+
+### Configuration
+
+The script uses global constants at the top of the file for configuration:
+- `TEXT = "save transcript"` - Button text to search for
+- `PANE = "Transcript"` - Window/pane name to search in
+- `APP = "zoom.us"` - Zoom process name
+
+To change these values, edit the constants in `autosave-zoom-transcript.py`.
 
 ### Examples
 
 ```bash
-# Run once in background mode
-python autosave-zoom-transcript.py --once --background-only
+# Run once
+python autosave-zoom-transcript.py --once
 
 # Run with 30-second interval and debug output
 python autosave-zoom-transcript.py --interval 30 --debug
 
-# Force focus mode (useful for troubleshooting)
-python autosave-zoom-transcript.py --force-focus --debug
+# Run continuously (default 60-second interval)
+python autosave-zoom-transcript.py
 ```
 
 ## Permissions
@@ -101,6 +113,7 @@ You can check/grant these in: **System Settings → Privacy & Security → Acces
 ## Notes
 
 - The script uses macOS Accessibility features to interact with Zoom
-- Background mode is preferred to avoid interrupting your workflow
-- The script will automatically fall back to focus mode if background mode fails (unless `--background-only` is used)
+- Always runs in background mode (no window focus required)
+- Automatically handles Zoom restarts and PID changes
+- Only clicks the "Save transcript" button when it's available in an active meeting
 

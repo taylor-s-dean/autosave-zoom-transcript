@@ -9,7 +9,6 @@
     <array>
         <string>__PYTHON_PATH__</string>
         <string>__SCRIPT_PATH__</string>
-        <string>--background-only</string>
         <string>--interval</string>
         <string>10</string>
     </array>

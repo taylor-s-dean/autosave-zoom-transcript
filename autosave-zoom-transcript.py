@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 import argparse
-import os
 import subprocess
 import sys
 import time
 from typing import Optional
 
 try:
-    from AppKit import NSWorkspace  # type: ignore
-
-    # NSWorkspace is in AppKit, which is part of Cocoa framework in PyObjC
     from ApplicationServices import (  # type: ignore
         AXUIElementCreateApplication,
         AXUIElementCopyAttributeValue,
@@ -37,11 +33,35 @@ TEXT = "save transcript"
 PANE = "Transcript"
 APP = "zoom.us"
 
+# Runtime constants
+MAX_ELEMENT_DEPTH = 3
+MAX_WINDOW_RETRIES = 3
+RETRY_DELAY_BASE = 0.5  # seconds
+PGREP_TIMEOUT = 2  # seconds
+
 
 def dbg(message: str, debug: bool):
     """Debug logging helper"""
     if debug:
         print(f"[DBG] {message}")
+
+
+def cfarray_to_list(cfarray, debug: bool = False) -> list:
+    """Convert a CFArray to a Python list, handling both CFArray and list types."""
+    if isinstance(cfarray, list):
+        return cfarray
+    result = []
+    try:
+        count = len(cfarray) if hasattr(cfarray, "__len__") else 0
+        for i in range(count):
+            try:
+                result.append(cfarray[i])
+            except Exception:
+                pass
+    except Exception as e:
+        if debug:
+            dbg(f"Error converting CFArray to list: {e}", debug)
+    return result
 
 
 def get_zoom_process(debug: bool) -> Optional[int]:
@@ -56,7 +76,7 @@ def get_zoom_process(debug: bool) -> Optional[int]:
             ["pgrep", "-x", "zoom.us"],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=PGREP_TIMEOUT,
         )
         if result.returncode == 0 and result.stdout.strip():
             pids = [
@@ -133,11 +153,11 @@ def get_windows(pid: int, debug: bool, retry_count: int = 0) -> list:
 
         # If no windows and we haven't retried yet, wait a bit and retry
         # (Zoom might be starting up and windows not ready yet, especially after restart)
-        if not windows and retry_count < 3:
-            wait_time = 0.5 * (retry_count + 1)  # Exponential backoff: 0.5s, 1.0s, 1.5s
+        if not windows and retry_count < MAX_WINDOW_RETRIES:
+            wait_time = RETRY_DELAY_BASE * (retry_count + 1)  # Exponential backoff
             if debug:
                 dbg(
-                    f"No windows found, retrying in {wait_time}s (attempt {retry_count + 1}/3)...",
+                    f"No windows found, retrying in {wait_time}s (attempt {retry_count + 1}/{MAX_WINDOW_RETRIES})...",
                     debug,
                 )
             time.sleep(wait_time)
@@ -150,21 +170,7 @@ def get_windows(pid: int, debug: bool, retry_count: int = 0) -> list:
             )
 
         if windows:
-            # PyObjC may return a list or CFArray - handle both
-            if isinstance(windows, list):
-                window_list = windows
-            else:
-                # Convert CFArray to Python list
-                window_list = []
-                try:
-                    count = len(windows) if hasattr(windows, "__len__") else 0
-                    for i in range(count):
-                        try:
-                            window_list.append(windows[i])
-                        except:
-                            pass
-                except:
-                    pass
+            window_list = cfarray_to_list(windows, debug)
             dbg(f"Found {len(window_list)} windows", debug)
             return window_list
         dbg("No windows found", debug)
@@ -215,22 +221,7 @@ def get_all_elements(
             element, kAXChildrenAttribute, None
         )
         if result == 0 and children:
-            # PyObjC may return a list or CFArray - handle both
-            if isinstance(children, list):
-                children_list = children
-            else:
-                # Convert CFArray to Python list
-                children_list = []
-                try:
-                    count = len(children) if hasattr(children, "__len__") else 0
-                    for i in range(count):
-                        try:
-                            children_list.append(children[i])
-                        except:
-                            pass
-                except:
-                    pass
-
+            children_list = cfarray_to_list(children, debug)
             for child in children_list:
                 try:
                     elements.append(child)
@@ -266,7 +257,9 @@ def search_and_press(scope_window, needle: str, debug: bool) -> str:
         # Get all elements in the window
         dbg("Starting element search...", debug)
         all_elements = [scope_window]
-        all_elements.extend(get_all_elements(scope_window, debug, max_depth=3))
+        all_elements.extend(
+            get_all_elements(scope_window, debug, max_depth=MAX_ELEMENT_DEPTH)
+        )
         dbg(f"Scanning {len(all_elements)} elements", debug)
 
         if not all_elements:
@@ -369,13 +362,14 @@ def main():
     )
 
     def print_result(out: str):
+        """Print result, extracting status line if debug mode."""
+        status = out.splitlines()[-1] if "\n" in out else out if out else "[NO OUTPUT]"
         if args.debug:
             print(f"[RESULT] {out}")
             if out:
-                print("[STATUS]", out.splitlines()[-1] if "\n" in out else out)
+                print(f"[STATUS] {status}")
         else:
-            status = out.splitlines()[-1] if "\n" in out else out
-            print(f"[RESULT] {status or '[NO OUTPUT]'}")
+            print(f"[RESULT] {status}")
 
     try:
         while True:
