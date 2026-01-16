@@ -11,6 +11,12 @@ __pycache__/
 venv/
 env/
 ENV/
+.venv/
+.mypy_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
 
 # IDE
 .vscode/
@@ -18,4 +24,13 @@ ENV/
 *.swp
 *.swo
 *~
+
+# Claude Code
+.claude/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
 

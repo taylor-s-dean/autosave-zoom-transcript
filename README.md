@@ -6,7 +6,7 @@ Automatically saves Zoom transcripts by clicking the "Save transcript" button at
 
 - Runs in background mode (no window focus required)
 - Configurable interval between save attempts
-- Automatic fallback to focus mode if background fails
+- Automatically handles Zoom restarts and PID changes
 - Minimal CPU usage with sleep intervals
 
 ## Setup
@@ -24,7 +24,7 @@ pip install -r requirements.txt
 
 This installs:
 - `pyobjc-framework-ApplicationServices` - For Accessibility API
-- `pyobjc-framework-Cocoa` - For AppKit (NSWorkspace)
+- `pyobjc-framework-Cocoa` - PyObjC framework dependency
 - `pyobjc-core` - Core PyObjC functionality
 
 ## Running as a LaunchAgent (Recommended)
@@ -113,7 +113,5 @@ You can check/grant these in: **System Settings → Privacy & Security → Acces
 ## Notes
 
 - The script uses macOS Accessibility features to interact with Zoom
-- Always runs in background mode (no window focus required)
-- Automatically handles Zoom restarts and PID changes
 - Only clicks the "Save transcript" button when it's available in an active meeting
 
